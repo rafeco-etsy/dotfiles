@@ -1,52 +1,131 @@
 #!/bin/bash
+# Claude Code Status Line
+# Fields: session, model, git, context, cost, duration, clock, gcloud
 
-# Read JSON input
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BOLD_GREEN='\033[1;32m'
+LABEL='\033[1;37m'
+RESET='\033[0m'
+
 input=$(cat)
-cwd=$(echo "$input" | jq -r '.workspace.current_dir')
+jqr() { echo "$input" | jq -r "$1"; }
 
-# Substitute home directory with ~
-user=$(whoami)
-display_cwd=$(echo "$cwd" | sed "s|^/Users/$user|~|; s|^/home/$user|~|")
+session_id=$(jqr '.session_id // empty')
+transcript_path=$(jqr '.transcript_path // empty')
+cwd=$(jqr '.workspace.current_dir // .cwd // empty')
+model=$(jqr '.model.display_name // "unknown"')
+pct=$(jqr '.context_window.used_percentage // 0')
+cost=$(jqr '.cost.total_cost_usd // 0')
+duration_ms=$(jqr '.cost.total_duration_ms // 0')
 
-# Base prompt: username@hostname:directory
-printf '\033[36m%s@%s\033[0m:\033[35m%s\033[0m' "$(whoami)" "$(hostname -s)" "$display_cwd"
-
-# Git enhancements
-if cd "$cwd" 2>/dev/null && git rev-parse --is-inside-work-tree &>/dev/null; then
-    # Get current branch
-    branch=$(git --no-optional-locks rev-parse --abbrev-ref HEAD 2>/dev/null)
-
-    # Check for dirty/clean status
-    dirty=""
-    if ! git --no-optional-locks diff --quiet 2>/dev/null || \
-       ! git --no-optional-locks diff --cached --quiet 2>/dev/null || \
-       [ -n "$(git --no-optional-locks ls-files --others --exclude-standard 2>/dev/null)" ]; then
-        dirty="*"
-    fi
-
-    # Get ahead/behind counts relative to remote
-    ahead_behind=""
-    upstream=$(git --no-optional-locks rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null)
-    if [ -n "$upstream" ]; then
-        counts=$(git --no-optional-locks rev-list --left-right --count HEAD...$upstream 2>/dev/null)
-        if [ -n "$counts" ]; then
-            ahead=$(echo "$counts" | awk '{print $1}')
-            behind=$(echo "$counts" | awk '{print $2}')
-            [ "$ahead" -gt 0 ] && ahead_behind="${ahead_behind}↑${ahead}"
-            [ "$behind" -gt 0 ] && ahead_behind="${ahead_behind}↓${behind}"
-            [ -n "$ahead_behind" ] && ahead_behind=" ${ahead_behind}"
-        fi
-    fi
-
-    # Get stash count
-    stash_info=""
-    stash_count=$(git --no-optional-locks stash list 2>/dev/null | wc -l | tr -d ' ')
-    if [ "$stash_count" -gt 0 ]; then
-        stash_info=" stash:${stash_count}"
-    fi
-
-    # Print git info in yellow
-    printf '\033[33m (%s%s%s%s)\033[0m' "$branch" "$dirty" "$ahead_behind" "$stash_info"
+# --- Session ---
+# NOTE: --name doesn't expose the name to statusline scripts yet.
+# This catches names set via /rename (writes custom-title to transcript).
+session=""
+if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+    session=$(grep '"type":"custom-title"' "$transcript_path" 2>/dev/null | tail -1 | jq -r '.customTitle // empty' 2>/dev/null)
+fi
+if [ -z "$session" ]; then
+    session_field=$(printf "%bunnamed%b" "$YELLOW" "$RESET")
+else
+    session_field=$(printf "%b%s%b" "$BOLD_GREEN" "$session" "$RESET")
 fi
 
-echo
+# --- Git ---
+git_field=""
+if [ -n "$cwd" ] && git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
+    branch=$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    repo=$(basename "$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)")
+    if [ -n "$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)" ]; then
+        git_field=$(printf "%b%s/%s *%b" "$YELLOW" "$repo" "$branch" "$RESET")
+    else
+        git_field=$(printf "%b%s/%s%b" "$GREEN" "$repo" "$branch" "$RESET")
+    fi
+fi
+
+# --- Context ---
+pct_int=${pct%.*}
+if [ "$pct_int" -lt 50 ] 2>/dev/null; then
+    ctx_color="$GREEN"
+elif [ "$pct_int" -lt 80 ] 2>/dev/null; then
+    ctx_color="$YELLOW"
+else
+    ctx_color="$RED"
+fi
+context_field=$(printf "%b%d%%%b" "$ctx_color" "$pct_int" "$RESET")
+
+# --- Cost ---
+cost_field=$(printf "\$%.2f" "$cost")
+
+# --- Duration ---
+ms=${duration_ms%.*}
+if [ "$ms" -ge 60000 ] 2>/dev/null; then
+    duration_field="$((ms / 60000))m"
+elif [ "$ms" -gt 0 ] 2>/dev/null; then
+    duration_field="$((ms / 1000))s"
+else
+    duration_field="0s"
+fi
+
+# --- Clock ---
+hour=$((10#$(date +%H)))
+time_str=$(date +%H:%M)
+dow=$(date +%u)
+if [ "$dow" -ge 6 ]; then
+    clock_color="$RED"
+elif [ "$hour" -lt 6 ]; then
+    clock_color="$RED"
+elif [ "$hour" -lt 7 ]; then
+    clock_color="$YELLOW"
+elif [ "$hour" -ge 18 ]; then
+    clock_color="$RED"
+elif [ "$hour" -ge 16 ]; then
+    clock_color="$YELLOW"
+else
+    clock_color="$GREEN"
+fi
+clock_field=$(printf "%b%s%b" "$clock_color" "$time_str" "$RESET")
+
+# --- GCloud ---
+gcloud_field=""
+creds_file="$HOME/.config/gcloud/credentials.db"
+if [ -f "$creds_file" ]; then
+    auth_epoch=$(stat -c %Y "$creds_file" 2>/dev/null || stat -f %m "$creds_file" 2>/dev/null)
+    if [ -n "$auth_epoch" ]; then
+        now=$(date +%s)
+        diff=$(( (auth_epoch + 86400) - now ))
+        if [ "$diff" -le 0 ]; then
+            gcloud_field=$(printf "%bEXPIRED%b" "$RED" "$RESET")
+        else
+            hours=$((diff / 3600))
+            mins=$(((diff % 3600) / 60))
+            if [ "$hours" -lt 1 ]; then
+                gc_color="$RED"
+            elif [ "$hours" -lt 2 ]; then
+                gc_color="$YELLOW"
+            else
+                gc_color="$GREEN"
+            fi
+            if [ "$hours" -gt 0 ]; then
+                gcloud_field=$(printf "%b%dh%dm%b" "$gc_color" "$hours" "$mins" "$RESET")
+            else
+                gcloud_field=$(printf "%b%dm%b" "$gc_color" "$mins" "$RESET")
+            fi
+        fi
+    fi
+fi
+
+# --- Build output ---
+sep=" | "
+out="$session_field"
+out+="${sep}${model}"
+[ -n "$git_field" ] && out+="${sep}${git_field}"
+out+="${sep}${LABEL}Context: ${RESET}${context_field}"
+out+="${sep}${LABEL}Cost: ${RESET}${cost_field}"
+out+="${sep}${LABEL}Time: ${RESET}${duration_field}"
+out+="${sep}${LABEL}Clock: ${RESET}${clock_field}"
+[ -n "$gcloud_field" ] && out+="${sep}${LABEL}GCloud: ${RESET}${gcloud_field}"
+
+printf "%b" "$out"

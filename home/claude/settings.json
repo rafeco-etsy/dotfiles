@@ -6,7 +6,7 @@
   "enabledPlugins": {
     "superpowers@superpowers-marketplace": false,
     "frontend-design@claude-code-plugins": true,
-    "claude-statusline@etsy-tools": true
+    "claude-statusline@etsy-tools": false
   },
   "extraKnownMarketplaces": {
     "etsy-tools": {
