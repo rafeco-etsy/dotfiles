@@ -21,11 +21,14 @@ cost=$(jqr '.cost.total_cost_usd // 0')
 duration_ms=$(jqr '.cost.total_duration_ms // 0')
 
 # --- Session ---
-# NOTE: --name doesn't expose the name to statusline scripts yet.
-# This catches names set via /rename (writes custom-title to transcript).
+# Check: 1) /rename custom-title in transcript, 2) cached name from SessionStart hook
 session=""
 if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
     session=$(grep '"type":"custom-title"' "$transcript_path" 2>/dev/null | tail -1 | jq -r '.customTitle // empty' 2>/dev/null)
+fi
+if [ -z "$session" ] && [ -n "$session_id" ]; then
+    name_file="/tmp/claude-session-${session_id}.name"
+    [ -f "$name_file" ] && session=$(cat "$name_file" 2>/dev/null)
 fi
 if [ -z "$session" ]; then
     session_field=$(printf "%bunnamed%b" "$YELLOW" "$RESET")
